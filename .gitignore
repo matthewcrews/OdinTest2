@@ -1,0 +1,5 @@
+*build
+*.rdbg
+*vscode
+ols.json
+*.exe
