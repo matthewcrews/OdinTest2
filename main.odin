@@ -7,6 +7,45 @@ import "core:math"
 // import "core:mem/virtual"
 // import "core:sys/windows"
 import "core:time"
+import "core:intrinsics"
+
+Row :: struct($K, $T: typeid)
+	where intrinsics.type_is_integer(K) {
+	values: []T
+}
+
+row_get :: #force_inline proc (row: Row($K, $T), k: K) -> T {
+	return row.values[k]
+}
+
+row_set :: #force_inline proc (row: Row($K, $V), k: K, v: V) {
+	row.values[k] = v
+}
+
+row_cnt :: #force_inline proc(row: Row($K, $V)) -> int {
+	return len(row.values)
+}
+
+Bar :: struct($K, $T: typeid) 
+	where intrinsics.type_is_integer(K) {
+	values: []T
+}
+
+bar_get :: #force_inline proc (bar: Bar($K, $T), k: K) -> T {
+	return bar.values[k]
+}
+
+bar_cnt :: #force_inline proc(bar: Bar($K, $V)) -> int {
+	return len(bar.values)
+}
+
+get :: proc{row_get, bar_get}
+set :: proc{row_set}
+cnt :: proc{
+	row_cnt,
+	bar_cnt,
+}
+
 
 BufferId :: distinct i32
 ConstraintId :: distinct i32
@@ -34,156 +73,156 @@ DownType :: union {
 }
 
 push_relabel_solve :: proc (
-	flowRates,
-	excesses,
-	levels,
-	capacities,
-	limits: []f64,
-	nodes: []Node,
-	bufferSources: []Maybe(Source),
-	bufferTargets: []Maybe(Target),
-	constraintSources: []Source,
-	constraintTargets: []Target,
+	flowRates: Row(NodeId, f64),
+	excesses: Row(NodeId, f64),
+	levels: Row(BufferId, f64),
+	capacities: Row(BufferId, f64),
+	limits: Row(ConstraintId, f64),
+	nodes: Bar(NodeId, Node),
+	bufferSources: Bar(BufferId, Maybe(Source)),
+	bufferTargets: Bar(BufferId, Maybe(Target)),
+	constraintSources: Bar(ConstraintId, Source),
+	constraintTargets: Bar(ConstraintId, Target),
 	bufferNodeIds: []NodeId,
-	downStatus: []Maybe(DownType),
+	downStatus: Row(ConstraintId, Maybe(DownType)),
 ) {
 	toPush := make([dynamic]NodeId, 0, 16, allocator = context.temp_allocator)
 	toReturn := make([dynamic]NodeId, 0, 16, allocator = context.temp_allocator)
-	isSaturated := bit_array.create(len(nodes), allocator = context.temp_allocator)
+	isSaturated := bit_array.create(cnt(nodes), allocator = context.temp_allocator)
 
 	// Perform the initial pushes of flow to the Buffer targets
 	for nodeId, bufferId in bufferNodeIds {
-		target, hasTarget := bufferTargets[bufferId].?
+		target, hasTarget := get(bufferTargets, bufferId).?
 		if hasTarget {
-			if levels[bufferId] > 0.0 {
-				flowRates[target.EdgeId] = math.INF_F64
-				excesses[target.NodeId] = math.INF_F64
+			if get(levels, bufferId) > 0.0 {
+				set(flowRates, target.EdgeId, math.INF_F64) 
+				set(excesses, target.NodeId, math.INF_F64)
 			}
 			append(&toPush, target.NodeId)
 		}
 	}
 
-	for (len(toPush) > 0) || (len(toReturn) > 0) {
-		for len(toPush) > 0 {
-			nodeId := pop(&toPush)
-			node := nodes[nodeId]
-			switch innerId in node {
-				case BufferId: {
-					bufferId := innerId
-					if (excesses[nodeId] > 0.0) && 
-						((levels[bufferId] <= 0.0 || levels[bufferId] >= capacities[bufferId])) {
-							source, hasSource := bufferSources[bufferId].?
-							target, hasTarget := bufferTargets[bufferId].?
+	// for (len(toPush) > 0) || (len(toReturn) > 0) {
+	// 	for len(toPush) > 0 {
+	// 		nodeId := pop(&toPush)
+	// 		node := get(nodes, nodeId)
+	// 		switch innerId in node {
+	// 			case BufferId: {
+	// 				bufferId := innerId
+	// 				if (get(excesses, nodeId) > 0.0) && 
+	// 					((get(levels, bufferId) <= 0.0 || get(levels, bufferId) >= get(capacities, bufferId))) {
+	// 						source, hasSource := bufferSources[bufferId].?
+	// 						target, hasTarget := bufferTargets[bufferId].?
 
-							if hasSource && hasTarget {
-								if bit_array.get(isSaturated, nodeId) {
+	// 						if hasSource && hasTarget {
+	// 							if bit_array.get(isSaturated, nodeId) {
 
-									inletRate := flowRates[source.EdgeId]
-									outletRate := flowRates[target.EdgeId]
+	// 								inletRate := flowRates[source.EdgeId]
+	// 								outletRate := flowRates[target.EdgeId]
 
-									if (levels[bufferId] >= capacities[bufferId]) && (inletRate > outletRate){
-										bit_array.set(isSaturated, nodeId)
-										excesses[source.NodeId] = excesses[source.NodeId] + flowRates[source.EdgeId] - flowRates[target.EdgeId]
-										flowRates[source.EdgeId] = flowRates[target.EdgeId]
-										append(&toReturn, source.NodeId)
-									} else if levels[bufferId] <= 0.0 {
-										flowRates[target.EdgeId] = excesses[nodeId]
-										excesses[target.NodeId] = excesses[target.NodeId] + excesses[nodeId]
-										excesses[nodeId] = 0.0
-										append(&toPush, target.NodeId)
-									}
-								} else {
-									flowRates[target.EdgeId] = flowRates[target.EdgeId] + excesses[nodeId]
-									excesses[target.NodeId] = excesses[target.NodeId] + excesses[nodeId]
-									excesses[nodeId] = 0.0
-									append(&toPush, target.NodeId)
-								}
-							} else if (hasSource && (!hasTarget)) {
-								if levels[bufferId] >= capacities[bufferId] {
-									flowRates[source.EdgeId] = 0.0
-									excesses[source.NodeId] = excesses[source.NodeId] + excesses[nodeId]
-									excesses[nodeId] = 0.0
-									append(&toReturn, source.NodeId)
-									bit_array.set(isSaturated, nodeId)
-								}
-							}
-						}
-				}
-				case ConstraintId: {
-					constraintId := innerId
-					source := constraintSources[constraintId]
-					target := constraintTargets[constraintId]
+	// 								if (levels[bufferId] >= capacities[bufferId]) && (inletRate > outletRate){
+	// 									bit_array.set(isSaturated, nodeId)
+	// 									excesses[source.NodeId] = excesses[source.NodeId] + flowRates[source.EdgeId] - flowRates[target.EdgeId]
+	// 									flowRates[source.EdgeId] = flowRates[target.EdgeId]
+	// 									append(&toReturn, source.NodeId)
+	// 								} else if levels[bufferId] <= 0.0 {
+	// 									flowRates[target.EdgeId] = excesses[nodeId]
+	// 									excesses[target.NodeId] = excesses[target.NodeId] + excesses[nodeId]
+	// 									excesses[nodeId] = 0.0
+	// 									append(&toPush, target.NodeId)
+	// 								}
+	// 							} else {
+	// 								flowRates[target.EdgeId] = flowRates[target.EdgeId] + excesses[nodeId]
+	// 								excesses[target.NodeId] = excesses[target.NodeId] + excesses[nodeId]
+	// 								excesses[nodeId] = 0.0
+	// 								append(&toPush, target.NodeId)
+	// 							}
+	// 						} else if (hasSource && (!hasTarget)) {
+	// 							if levels[bufferId] >= capacities[bufferId] {
+	// 								flowRates[source.EdgeId] = 0.0
+	// 								excesses[source.NodeId] = excesses[source.NodeId] + excesses[nodeId]
+	// 								excesses[nodeId] = 0.0
+	// 								append(&toReturn, source.NodeId)
+	// 								bit_array.set(isSaturated, nodeId)
+	// 							}
+	// 						}
+	// 					}
+	// 			}
+	// 			case ConstraintId: {
+	// 				constraintId := innerId
+	// 				source := constraintSources[constraintId]
+	// 				target := constraintTargets[constraintId]
 					
-					if bit_array.get(isSaturated, target.NodeId){
-						bit_array.set(isSaturated, nodeId)
-						flowRates[source.EdgeId] = flowRates[target.EdgeId]
-						excesses[source.NodeId] = excesses[source.NodeId] + excesses[target.NodeId]
-						append(&toReturn, source.NodeId)
-					} else {
+	// 				if bit_array.get(isSaturated, target.NodeId){
+	// 					bit_array.set(isSaturated, nodeId)
+	// 					flowRates[source.EdgeId] = flowRates[target.EdgeId]
+	// 					excesses[source.NodeId] = excesses[source.NodeId] + excesses[target.NodeId]
+	// 					append(&toReturn, source.NodeId)
+	// 				} else {
 						
-						downType, isDown := downStatus[constraintId].?
+	// 					downType, isDown := downStatus[constraintId].?
 						
-						pushAmount : f64
-						if isDown {
-							pushAmount = 0.0
-						} else {
-							excess := excesses[nodeId]
-							remainingFlowCapacity := limits[constraintId] - flowRates[target.EdgeId]
-							pushAmount = math.min(excess, remainingFlowCapacity)
-						}
+	// 					pushAmount : f64
+	// 					if isDown {
+	// 						pushAmount = 0.0
+	// 					} else {
+	// 						excess := excesses[nodeId]
+	// 						remainingFlowCapacity := limits[constraintId] - flowRates[target.EdgeId]
+	// 						pushAmount = math.min(excess, remainingFlowCapacity)
+	// 					}
 
-						excesses[nodeId] = excesses[nodeId] - pushAmount
-						flowRates[target.EdgeId] = flowRates[target.EdgeId] + pushAmount
-						excesses[target.NodeId] = excesses[target.NodeId] + pushAmount
-						append(&toPush, target.NodeId)
+	// 					excesses[nodeId] = excesses[nodeId] - pushAmount
+	// 					flowRates[target.EdgeId] = flowRates[target.EdgeId] + pushAmount
+	// 					excesses[target.NodeId] = excesses[target.NodeId] + pushAmount
+	// 					append(&toPush, target.NodeId)
 
-						if excesses[nodeId] > 0.0 {
-							flowRates[source.EdgeId] = flowRates[target.EdgeId]
-							excesses[source.NodeId] = excesses[source.NodeId] + excesses[nodeId]
-							excesses[nodeId] = 0.0
-							append(&toReturn, source.NodeId)
-							bit_array.set(isSaturated, nodeId)
-						}
-					}
-				}
-			}
-		}
+	// 					if excesses[nodeId] > 0.0 {
+	// 						flowRates[source.EdgeId] = flowRates[target.EdgeId]
+	// 						excesses[source.NodeId] = excesses[source.NodeId] + excesses[nodeId]
+	// 						excesses[nodeId] = 0.0
+	// 						append(&toReturn, source.NodeId)
+	// 						bit_array.set(isSaturated, nodeId)
+	// 					}
+	// 				}
+	// 			}
+	// 		}
+	// 	}
 
-		for len(toReturn) > 0 {
-			nodeId := pop(&toReturn)
-			node := nodes[nodeId]
+	// 	for len(toReturn) > 0 {
+	// 		nodeId := pop(&toReturn)
+	// 		node := nodes[nodeId]
 
-			switch innerId in node {
-				case BufferId: {
-					bufferId := innerId
+	// 		switch innerId in node {
+	// 			case BufferId: {
+	// 				bufferId := innerId
 
-					if (excesses[nodeId] > 0.0) && (levels[bufferId] >= capacities[bufferId]) {
-						source, hasSource := bufferSources[bufferId].?
-						target, hasTarget := bufferTargets[bufferId].?
+	// 				if (excesses[nodeId] > 0.0) && (levels[bufferId] >= capacities[bufferId]) {
+	// 					source, hasSource := bufferSources[bufferId].?
+	// 					target, hasTarget := bufferTargets[bufferId].?
 
-						if (hasSource && hasTarget) {
-							if flowRates[source.EdgeId] > flowRates[target.EdgeId] {
-								flowRates[source.EdgeId] = flowRates[target.EdgeId]
-								excesses[source.NodeId] = excesses[source.NodeId] + excesses[nodeId]
-								excesses[nodeId] = 0.0
-								append(&toReturn, source.NodeId)
-							}
-						}
-					}
-				}
-				case ConstraintId: {
-					constraintId := innerId
-					source := constraintSources[constraintId]
-					target := constraintTargets[constraintId]
-					bit_array.set(isSaturated, nodeId)
-					flowRates[source.EdgeId] = flowRates[target.EdgeId]
-					excesses[source.NodeId] = excesses[source.NodeId] + excesses[nodeId]
-					excesses[nodeId] = 0.0
-					append(&toReturn, source.NodeId)
-				}
-			}
-		}
-	}
+	// 					if (hasSource && hasTarget) {
+	// 						if flowRates[source.EdgeId] > flowRates[target.EdgeId] {
+	// 							flowRates[source.EdgeId] = flowRates[target.EdgeId]
+	// 							excesses[source.NodeId] = excesses[source.NodeId] + excesses[nodeId]
+	// 							excesses[nodeId] = 0.0
+	// 							append(&toReturn, source.NodeId)
+	// 						}
+	// 					}
+	// 				}
+	// 			}
+	// 			case ConstraintId: {
+	// 				constraintId := innerId
+	// 				source := constraintSources[constraintId]
+	// 				target := constraintTargets[constraintId]
+	// 				bit_array.set(isSaturated, nodeId)
+	// 				flowRates[source.EdgeId] = flowRates[target.EdgeId]
+	// 				excesses[source.NodeId] = excesses[source.NodeId] + excesses[nodeId]
+	// 				excesses[nodeId] = 0.0
+	// 				append(&toReturn, source.NodeId)
+	// 			}
+	// 		}
+	// 	}
+	// }
 }
 
 
